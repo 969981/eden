@@ -1,0 +1,368 @@
+name: Sync Eden Forgejo and release Windows + Linux + macOS
+
+# Official Forgejo first, official GitHub mirror as fallback.
+# Keep this automation on main and preserve upstream source untouched on upstream-master.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/sync-eden-release.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: eden-official-upstream-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror Eden Forgejo master safely
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      commit: ${{ steps.sync.outputs.commit }}
+      upstream: ${{ steps.sync.outputs.upstream }}
+      source: ${{ steps.sync.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Check and mirror upstream
+        id: sync
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          official="https://git.eden-emu.dev/eden-emu/eden.git"
+          fallback="https://github.com/eden-emulator/mirror.git"
+          source=""
+          upstream=""
+          for url in "$official" "$fallback"; do
+            echo "Checking $url"
+            if lines=$(timeout 90 git ls-remote --exit-code "$url" refs/heads/master 2>/dev/null); then
+              candidate=$(printf '%s\n' "$lines" | awk 'NR==1 {print $1}')
+              if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+                source="$url"
+                upstream="$candidate"
+                break
+              fi
+            fi
+            echo "::warning::Cannot reach $url; trying next source."
+          done
+
+          if [[ -z "$upstream" ]]; then
+            echo "::error::No readable upstream master; mirror remains unchanged."
+            exit 1
+          fi
+
+          old=$(git ls-remote origin refs/heads/upstream-master | awk 'NR==1 {print $1}')
+          if [[ "$old" != "$upstream" ]]; then
+            echo "Fetching $upstream from $source"
+            git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=120 fetch --no-tags "$source" refs/heads/master
+            got=$(git rev-parse FETCH_HEAD)
+            if [[ "$got" != "$upstream" ]]; then
+              echo "::error::Source changed while fetching; retry on next run."
+              exit 1
+            fi
+            if [[ -n "$old" ]]; then
+              if ! git cat-file -e "$old^{commit}" 2>/dev/null; then
+                git fetch --no-tags origin refs/heads/upstream-master
+              fi
+              if ! git merge-base --is-ancestor "$old" "$upstream"; then
+                echo "::error::Upstream diverged or fallback mirror is stale. Refusing to rewrite history."
+                exit 1
+              fi
+            fi
+            # No force push: preserve existing source history and leave main alone.
+            git push origin "$upstream:refs/heads/upstream-master"
+          else
+            echo "Source branch already current."
+          fi
+
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "commit=$upstream" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          tag="eden-snapshot-${upstream:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already released $tag; skip compilation."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "No release $tag; building all three platforms."
+          fi
+          printf 'Source: %s\nCommit: %s\nTag: %s\n' "$source" "$upstream" "$tag" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    name: Windows x64 (MinGW / GUI)
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upstream-master
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git autoconf automake libtool make patch zip unzip
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-tools
+            mingw-w64-x86_64-qt6-charts
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-sdl3
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-vulkan-headers
+            mingw-w64-x86_64-vulkan-utility-libraries
+            mingw-w64-x86_64-python
+      - name: Configure and compile
+        shell: msys2 {0}
+        run: |
+          command -v patch
+          patch --version | head -1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF \
+            -DYUZU_ROOM=OFF -DYUZU_CMD=OFF -DENABLE_LIBUSB=OFF \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -Denet_FORCE_BUNDLED=ON -Dlibusb_FORCE_BUNDLED=ON \
+            -DVulkanMemoryAllocator_FORCE_BUNDLED=ON
+          ninja -C build yuzu
+          test -f build/bin/eden.exe
+      - name: Bundle Qt, runtime DLLs and ZIP
+        shell: msys2 {0}
+        run: |
+          set -e
+          mkdir -p dist/windows dist/packages
+          cp -a build/bin/. dist/windows/
+          DEPLOY_TOOL="$(command -v windeployqt6.exe || command -v windeployqt.exe)"
+          "$DEPLOY_TOOL" --release --no-translations dist/windows/eden.exe
+          # The Eden fork uses additional shared MinGW libraries not necessarily known to Qt.
+          for pass in 1 2 3 4; do
+            find dist/windows -type f \( -iname '*.exe' -o -iname '*.dll' \) -print0 \
+              | xargs -0 -r ldd 2>/dev/null \
+              | awk '/\/mingw64\/bin\// { print $3 }' | sort -u \
+              | while IFS= read -r dependency; do
+                  test -f "$dependency" && cp -n "$dependency" dist/windows/ || true
+                done
+          done
+          printf '[Paths]\nPlugins = plugins\n' > dist/windows/qt.conf
+          cp LICENSE.txt dist/windows/
+          (cd dist/windows && zip -qr ../packages/Eden-Windows-x64-MinGW.zip .)
+          test -s dist/packages/Eden-Windows-x64-MinGW.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-windows-x64
+          path: dist/packages/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux x64 (Ubuntu 24.04)
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upstream-master
+          submodules: recursive
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake build-essential clang git glslang-tools \
+            libglu1-mesa-dev libhidapi-dev libpulse-dev libtool libudev-dev \
+            nasm ninja-build libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxext-dev \
+            libxkbcommon-x11-0 qt6-base-dev qt6-base-private-dev \
+            qt6-tools-dev qt6-charts-dev libfmt-dev liblz4-dev \
+            nlohmann-json3-dev libzstd-dev libssl-dev libavfilter-dev \
+            libavcodec-dev libswscale-dev pkg-config zlib1g-dev libva-dev \
+            libvdpau-dev libvulkan-dev spirv-tools spirv-headers \
+            libusb-1.0-0-dev libboost-dev libboost-fiber-dev \
+            libboost-context-dev libopus-dev libasound2-dev libgl1-mesa-dev \
+            libzip-dev
+          python3 -m pip install --break-system-packages "cmake>=3.31,<4"
+      - name: Configure and compile Linux GUI
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF \
+            -DYUZU_ROOM=OFF -DYUZU_CMD=OFF -DENABLE_LIBUSB=OFF \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -DYUZU_USE_BUNDLED_SDL3=ON -Denet_FORCE_BUNDLED=ON \
+            -Dfmt_FORCE_BUNDLED=ON -Dxbyak_FORCE_BUNDLED=ON \
+            -DVulkanMemoryAllocator_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          cmake --build build --target yuzu --parallel 3
+          test -x build/bin/eden
+      - name: Package Ubuntu archive
+        run: |
+          set -e
+          mkdir -p dist/linux dist/packages
+          cp -a build/bin/. dist/linux/
+          cp LICENSE.txt dist/linux/
+          printf '%s\n' \
+            "Eden experimental Linux x86_64 build (Ubuntu 24.04)." \
+            "This is NOT an AppImage; compatible system Qt, FFmpeg, Vulkan and other runtime libraries are required." \
+            "No games, firmware or keys included. Source: ${{ needs.sync.outputs.commit }}" \
+            > dist/linux/README-REQUIREMENTS.txt
+          tar -czf dist/packages/Eden-Linux-x64-Ubuntu24.04.tar.gz -C dist/linux .
+          test -s dist/packages/Eden-Linux-x64-Ubuntu24.04.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-linux-x64
+          path: dist/packages/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS ARM64 (Apple Silicon / DMG)
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upstream-master
+          submodules: recursive
+
+      - name: Install macOS dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install autoconf automake boost cmake ffmpeg fmt glslang hidapi \
+            libtool libusb libzip lz4 ninja nlohmann-json openssl@3 opus \
+            pkg-config qt@6 sdl3 speexdsp spirv-headers spirv-tools \
+            vulkan-headers vulkan-loader molten-vk zstd
+          cmake --version
+          xcodebuild -version
+          test "$(uname -m)" = "arm64"
+          test -f "$(brew --prefix molten-vk)/lib/libMoltenVK.dylib"
+
+      - name: Configure and compile macOS GUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          QT_PREFIX="$(brew --prefix qt@6)"
+          MOLTENVK="$(brew --prefix molten-vk)/lib/libMoltenVK.dylib"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            "-DQt6_DIR=$QT_PREFIX/lib/cmake/Qt6" \
+            "-DCMAKE_PREFIX_PATH=$QT_PREFIX;$(brew --prefix openssl@3)" \
+            "-DMOLTENVK_LIBRARY=$MOLTENVK" \
+            -DYUZU_USE_BUNDLED_MOLTENVK=OFF \
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF \
+            -DYUZU_ROOM=OFF -DYUZU_CMD=OFF -DENABLE_LIBUSB=OFF \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -Denet_FORCE_BUNDLED=ON \
+            -DVulkanMemoryAllocator_FORCE_BUNDLED=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          cmake --build build --target yuzu --parallel 3
+          test -x build/bin/eden.app/Contents/MacOS/eden
+
+      - name: Deploy, ad-hoc sign, and build DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="build/bin/eden.app"
+          "$(brew --prefix qt@6)/bin/macdeployqt" "$APP" -always-overwrite
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          mkdir -p dist/packages
+          hdiutil create -volname "Eden" -srcfolder "$APP" \
+            -ov -format UDZO dist/packages/Eden-macOS-ARM64.dmg
+          test -s dist/packages/Eden-macOS-ARM64.dmg
+          (cd dist/packages && shasum -a 256 Eden-macOS-ARM64.dmg > SHA256SUMS-macOS.txt)
+          file "$APP/Contents/MacOS/eden"
+          hdiutil verify dist/packages/Eden-macOS-ARM64.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-arm64
+          path: dist/packages/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Windows + Linux + macOS together
+    needs: [sync, windows, linux, macos]
+    if: >-
+      needs.sync.outputs.changed == 'true' &&
+      needs.windows.result == 'success' &&
+      needs.linux.result == 'success' &&
+      needs.macos.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download successful packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Check three packages and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.sync.outputs.commit }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream }}
+          SOURCE_URL: ${{ needs.sync.outputs.source }}
+        run: |
+          set -euo pipefail
+          cd dist
+          WINDOWS="Eden-Windows-x64-MinGW.zip"
+          LINUX="Eden-Linux-x64-Ubuntu24.04.tar.gz"
+          MACOS="Eden-macOS-ARM64.dmg"
+          test -s "$WINDOWS"
+          test -s "$LINUX"
+          test -s "$MACOS"
+          sha256sum "$WINDOWS" "$LINUX" "$MACOS" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          TAG="eden-snapshot-${UPSTREAM_SHA:0:12}"
+          cat > release-notes.md <<EOF
+          # Eden unofficial automated three-platform snapshot
+
+          Official upstream: $SOURCE_URL
+          Source commit: $UPSTREAM_SHA
+          GitHub Actions run: $GITHUB_RUN_ID
+
+          All packages are built from the same upstream commit:
+
+          - Windows x64: MinGW portable ZIP with Qt and DLL runtime dependencies.
+          - Linux x64: Ubuntu 24.04 TAR.GZ; requires system libraries, **not** an AppImage.
+          - macOS ARM64: experimental DMG with ad-hoc signed app; **not** notarized.
+          - SHA256SUMS.txt provides package hashes.
+
+          These are not official Eden releases; compilation does not guarantee compatibility.
+          No Nintendo games, firmware, or keys are included.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; avoiding duplicate."
+          else
+            gh release create "$TAG" "$WINDOWS" "$LINUX" "$MACOS" SHA256SUMS.txt \
+              --target "$SOURCE_SHA" \
+              --title "Eden snapshot ${UPSTREAM_SHA:0:12}" \
+              --notes-file release-notes.md --prerelease
+          fi
+          echo "Published: https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
