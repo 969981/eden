@@ -130,6 +130,7 @@ jobs:
             mingw-w64-x86_64-vulkan-headers
             mingw-w64-x86_64-vulkan-utility-libraries
             mingw-w64-x86_64-python
+            mingw-w64-x86_64-libusb
       - name: Configure and compile
         shell: msys2 {0}
         run: |
