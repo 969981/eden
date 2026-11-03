@@ -292,12 +292,34 @@ jobs:
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p dist/packages
-          hdiutil create -volname "Eden" -srcfolder "$APP" \
-            -ov -format UDZO dist/packages/Eden-macOS-ARM64.dmg
-          test -s dist/packages/Eden-macOS-ARM64.dmg
+          DMG="dist/packages/Eden-macOS-ARM64.dmg"
+          # hdiutil can intermittently report "Resource busy" on hosted macOS runners.
+          # Try once plus up to three retries, removing any incomplete image first.
+          created=false
+          for attempt in 1 2 3 4; do
+            rm -f "$DMG"
+            echo "Creating DMG (attempt $attempt/4)..."
+            if hdiutil create -volname "Eden" -srcfolder "$APP" \
+              -ov -format UDZO "$DMG"; then
+              created=true
+              break
+            fi
+            echo "::warning::hdiutil create failed (attempt $attempt/4)."
+            if (( attempt < 4 )); then
+              sleep $(( attempt * 10 ))
+            fi
+          done
+          if [[ "$created" != "true" ]]; then
+            echo "::error::DMG creation failed after four attempts."
+            hdiutil info || true
+            df -h . "${RUNNER_TEMP:-/tmp}" || true
+            ls -lah dist/packages || true
+            exit 1
+          fi
+          test -s "$DMG"
           (cd dist/packages && shasum -a 256 Eden-macOS-ARM64.dmg > SHA256SUMS-macOS.txt)
           file "$APP/Contents/MacOS/eden"
-          hdiutil verify dist/packages/Eden-macOS-ARM64.dmg
+          hdiutil verify "$DMG"
 
       - uses: actions/upload-artifact@v4
         with:
