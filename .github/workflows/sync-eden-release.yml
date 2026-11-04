@@ -195,8 +195,7 @@ jobs:
             libglu1-mesa-dev libhidapi-dev libpulse-dev libtool libudev-dev \
             nasm ninja-build libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxext-dev \
-            libxkbcommon-x11-0 qt6-base-dev qt6-base-private-dev \
-            qt6-tools-dev qt6-charts-dev libfmt-dev liblz4-dev \
+            libxkbcommon-x11-0 libxcb-cursor0 libfmt-dev liblz4-dev \
             nlohmann-json3-dev libzstd-dev libssl-dev libavfilter-dev \
             libavcodec-dev libswscale-dev pkg-config zlib1g-dev libva-dev \
             libvdpau-dev libvulkan-dev spirv-tools spirv-headers \
@@ -206,7 +205,11 @@ jobs:
           python3 -m pip install --break-system-packages "cmake>=3.31,<4"
       - name: Configure and compile Linux GUI
         run: |
+          set -euo pipefail
+          # Ubuntu 24.04 ships Qt 6.4.2; current Eden requires Qt >= 6.5.
+          # Download the checked upstream Qt CI package (Qt 6.11.1).
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DYUZU_USE_BUNDLED_QT=ON \
             -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF \
             -DYUZU_ROOM=OFF -DYUZU_CMD=OFF -DENABLE_LIBUSB=OFF \
             -DENABLE_UPDATE_CHECKER=OFF \
@@ -214,17 +217,49 @@ jobs:
             -Dfmt_FORCE_BUNDLED=ON -Dxbyak_FORCE_BUNDLED=ON \
             -DVulkanMemoryAllocator_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          grep '^Qt6_DIR:PATH=' build/CMakeCache.txt
           cmake --build build --target yuzu --parallel 3
           test -x build/bin/eden
       - name: Package Ubuntu archive
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p dist/linux dist/packages
           cp -a build/bin/. dist/linux/
           cp LICENSE.txt dist/linux/
+
+          # Ship matching Qt libraries and plugins; Ubuntu's system Qt is too old.
+          QT_CMAKE_DIR="$(sed -n 's/^Qt6_DIR:PATH=//p' build/CMakeCache.txt | head -n 1)"
+          test -n "$QT_CMAKE_DIR"
+          QT_PREFIX="$(realpath "$QT_CMAKE_DIR/../../..")"
+          echo "Packaging Qt from $QT_PREFIX"
+          test -e "$QT_PREFIX/lib/libQt6Core.so.6"
+          test -d "$QT_PREFIX/plugins/platforms"
+          mkdir -p dist/linux/qt/lib dist/linux/qt/plugins
+          cp -a "$QT_PREFIX"/lib/libQt6*.so* dist/linux/qt/lib/
+          cp -a "$QT_PREFIX"/plugins/. dist/linux/qt/plugins/
+          test -f dist/linux/qt/plugins/platforms/libqxcb.so
+
+          cat > dist/linux/run-eden.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$ROOT/qt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export QT_PLUGIN_PATH="$ROOT/qt/plugins"
+          exec "$ROOT/eden" "$@"
+          EOF
+          chmod +x dist/linux/run-eden.sh
+
+          env LD_LIBRARY_PATH="$PWD/dist/linux/qt/lib" ldd dist/linux/eden | tee /tmp/eden-ldd.txt
+          grep -F "libQt6Core.so.6 => $PWD/dist/linux/qt/lib/" /tmp/eden-ldd.txt
+          if grep -q 'not found' /tmp/eden-ldd.txt; then
+            echo "::error::A Linux runtime dependency is missing."
+            exit 1
+          fi
           printf '%s\n' \
             "Eden experimental Linux x86_64 build (Ubuntu 24.04)." \
-            "This is NOT an AppImage; compatible system Qt, FFmpeg, Vulkan and other runtime libraries are required." \
+            "Start with ./run-eden.sh to use the bundled Qt 6.11.1 libraries and plugins." \
+            "This is NOT an AppImage; compatible system FFmpeg, Vulkan and other runtime libraries are still required." \
             "No games, firmware or keys included. Source: ${{ needs.sync.outputs.commit }}" \
             > dist/linux/README-REQUIREMENTS.txt
           tar -czf dist/packages/Eden-Linux-x64-Ubuntu24.04.tar.gz -C dist/linux .
