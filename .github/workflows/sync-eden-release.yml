@@ -195,7 +195,8 @@ jobs:
             libglu1-mesa-dev libhidapi-dev libpulse-dev libtool libudev-dev \
             nasm ninja-build libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxext-dev \
-            libxkbcommon-x11-0 libxcb-cursor0 libfmt-dev liblz4-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libfmt-dev liblz4-dev \
             nlohmann-json3-dev libzstd-dev libssl-dev libavfilter-dev \
             libavcodec-dev libswscale-dev pkg-config zlib1g-dev libva-dev \
             libvdpau-dev libvulkan-dev spirv-tools spirv-headers \
