@@ -328,6 +328,21 @@ jobs:
             -DVulkanMemoryAllocator_FORCE_BUNDLED=ON \
             -DVulkanHeaders_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          # sirit v1.0.5 uses std::abort() without including <cstdlib>.
+          # Homebrew LLVM's libc++ correctly rejects this; patch only the
+          # vendored CI dependency, never the mirrored upstream source.
+          python3 - <<'PY'
+          from pathlib import Path
+          stream = Path(".cache/cpm/sirit/v1.0.5/src/stream.h")
+          if not stream.is_file():
+              raise SystemExit(f"Expected pinned sirit stream header is missing: {stream}")
+          source = stream.read_text(encoding="utf-8")
+          if "std::abort()" not in source:
+              raise SystemExit("Pinned sirit source changed; review workaround before proceeding")
+          if "#include <cstdlib>" not in source:
+              stream.write_text("#include <cstdlib>\n" + source, encoding="utf-8")
+          print("Verified sirit std::abort() has an explicit <cstdlib> include")
+          PY
           cmake --build build --target yuzu --parallel 3
           test -x build/bin/eden.app/Contents/MacOS/eden
 
