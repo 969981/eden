@@ -215,6 +215,20 @@ jobs:
           set -euo pipefail
           # Ubuntu 24.04 ships Qt 6.4.2; current Eden requires Qt >= 6.5.
           # Download the checked upstream Qt CI package (Qt 6.11.1).
+          # Fix upstream's std::jthread bind_front(stop_token) invocation: jthread
+          # prepends its stop_token, which makes this member bind non-invocable.
+          # Apply only to the checked-out CI source; fail closed if it changes.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("src/core/hle/service/glue/time/worker.cpp")
+          old = "m_thread = std::jthread(std::bind_front(&TimeWorker::ThreadFunc, this));"
+          new = "m_thread = std::jthread([this](std::stop_token token) { ThreadFunc(token); });"
+          code = path.read_text(encoding="utf-8")
+          if code.count(old) != 1:
+              raise SystemExit("Unexpected upstream TimeWorker signature; review CI workaround")
+          path.write_text(code.replace(old, new), encoding="utf-8")
+          print("Patched CI-only TimeWorker stop-token invocation")
+          PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
