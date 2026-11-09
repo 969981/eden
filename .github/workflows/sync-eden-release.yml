@@ -203,6 +203,12 @@ jobs:
             libusb-1.0-0-dev libboost-dev libboost-fiber-dev \
             libboost-context-dev libopus-dev libasound2-dev libgl1-mesa-dev \
             libzip-dev
+          # Upstream now rejects Ubuntu's GCC 13. Clang >=19 is mandatory.
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm-23.list
+          sudo apt-get update
+          sudo apt-get install -y clang-23 lld-23
+          clang-23 --version
           python3 -m pip install --break-system-packages "cmake>=3.31,<4"
       - name: Configure and compile Linux GUI
         run: |
@@ -210,6 +216,7 @@ jobs:
           # Ubuntu 24.04 ships Qt 6.4.2; current Eden requires Qt >= 6.5.
           # Download the checked upstream Qt CI package (Qt 6.11.1).
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
             -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DENABLE_WERROR=OFF \
             -DYUZU_ROOM=OFF -DYUZU_CMD=OFF -DENABLE_LIBUSB=OFF \
@@ -291,7 +298,7 @@ jobs:
           brew install autoconf automake boost cmake ffmpeg fmt glslang hidapi \
             libtool libusb libzip lz4 ninja nlohmann-json openssl@3 opus \
             pkg-config qt@6 sdl3 speexdsp spirv-headers spirv-tools \
-            vulkan-headers vulkan-loader molten-vk zstd
+            vulkan-headers vulkan-loader molten-vk zstd llvm
           cmake --version
           xcodebuild -version
           test "$(uname -m)" = "arm64"
@@ -303,7 +310,12 @@ jobs:
           set -euo pipefail
           QT_PREFIX="$(brew --prefix qt@6)"
           MOLTENVK="$(brew --prefix molten-vk)/lib/libMoltenVK.dylib"
+          # AppleClang is rejected by Eden's CompilerChecks.cmake; use Homebrew LLVM.
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          "$LLVM_PREFIX/bin/clang++" --version
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_C_COMPILER=$LLVM_PREFIX/bin/clang" \
+            "-DCMAKE_CXX_COMPILER=$LLVM_PREFIX/bin/clang++" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             "-DQt6_DIR=$QT_PREFIX/lib/cmake/Qt6" \
             "-DCMAKE_PREFIX_PATH=$QT_PREFIX;$(brew --prefix openssl@3)" \
