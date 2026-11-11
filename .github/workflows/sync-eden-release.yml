@@ -229,6 +229,21 @@ jobs:
           path.write_text(code.replace(old, new), encoding="utf-8")
           print("Patched CI-only TimeWorker stop-token invocation")
           PY
+          # Linux Clang 23 + libstdc++14 cannot format NcaID (std::array<u8,16>)
+          # directly. Use the same hex conversion already used by this function.
+          # This is a build-only working-tree patch: upstream-master is not changed.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("src/core/file_sys/registered_cache.cpp")
+          old = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, id);'
+          new = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, Common::HexToString(id, false));'
+          source = path.read_text(encoding="utf-8")
+          if source.count(old) == 1:
+              path.write_text(source.replace(old, new), encoding="utf-8")
+          elif source.count(new) != 1:
+              raise SystemExit("Unexpected registered_cache.cpp logging call; review upstream")
+          print("Verified CI-only NcaID-to-hex log formatting")
+          PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
