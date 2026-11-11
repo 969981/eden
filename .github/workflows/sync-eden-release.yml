@@ -238,11 +238,13 @@ jobs:
           old = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, id);'
           new = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, Common::HexToString(id, false));'
           source = path.read_text(encoding="utf-8")
-          if source.count(old) == 1:
+          # Create() and Delete() each have this exact logging call.
+          # Replace both, but refuse unexpected upstream refactors.
+          if source.count(old) + source.count(new) != 2:
+              raise SystemExit("Unexpected registered_cache.cpp NcaID logging sites")
+          if old in source:
               path.write_text(source.replace(old, new), encoding="utf-8")
-          elif source.count(new) != 1:
-              raise SystemExit("Unexpected registered_cache.cpp logging call; review upstream")
-          print("Verified CI-only NcaID-to-hex log formatting")
+          print("Verified both CI-only NcaID-to-hex logging sites")
           PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
