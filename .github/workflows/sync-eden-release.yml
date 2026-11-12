@@ -246,6 +246,20 @@ jobs:
               path.write_text(source.replace(old, new), encoding="utf-8")
           print("Verified both CI-only NcaID-to-hex logging sites")
           PY
+          # Same std::array<u8, 16> formatting bug exists in the NAX/xts
+          # constructor. This header already provides HexToString().
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("src/core/file_sys/xts_archive.cpp")
+          old = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, nca_id);'
+          new = 'LOG_DEBUG(Loader, "Decoded {} bytes, nca id {}", hash_len, Common::HexToString(nca_id, false));'
+          source = path.read_text(encoding="utf-8")
+          if source.count(old) + source.count(new) != 1:
+              raise SystemExit("Unexpected xts_archive.cpp NAX logging site; review upstream source")
+          if old in source:
+              path.write_text(source.replace(old, new), encoding="utf-8")
+          print("Verified CI-only NAX NcaID-to-hex logging site")
+          PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
