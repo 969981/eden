@@ -260,6 +260,21 @@ jobs:
               path.write_text(source.replace(old, new), encoding="utf-8")
           print("Verified CI-only NAX NcaID-to-hex logging site")
           PY
+          # Clang 23 + libstdc++ 14 cannot format the fixed-size std::array
+          # used for SSID logging directly; format its meaningful byte range.
+          # Patch only this CI checkout, not the mirrored upstream-master.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("src/core/hle/service/nifm/nifm.cpp")
+          before = 'LOG_INFO(Service_NIFM, "ssid={} lenght={}", wifi.ssid, wifi.ssid_length);'
+          after = 'LOG_INFO(Service_NIFM, "ssid={} lenght={}", std::string_view(wifi.ssid.data(), wifi.ssid_length), wifi.ssid_length);'
+          code = path.read_text(encoding="utf-8")
+          if code.count(before) + code.count(after) != 1:
+              raise SystemExit("Unexpected NIFM logging signature; review CI workaround")
+          if before in code:
+              path.write_text(code.replace(before, after), encoding="utf-8")
+          print("Verified CI-only NIFM SSID string_view log formatting")
+          PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
