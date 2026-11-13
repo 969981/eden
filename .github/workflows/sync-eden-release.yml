@@ -275,6 +275,25 @@ jobs:
               path.write_text(code.replace(before, after), encoding="utf-8")
           print("Verified CI-only NIFM SSID string_view log formatting")
           PY
+          # Clang 23 + libstdc++14 rejects ranges::to piping in reporter.cpp.
+          # Replace four report-only conversions with equivalent explicit loops in CI checkout.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/core/reporter.cpp')
+          code = path.read_text(encoding='utf-8')
+          replacements = [
+              ("        backtrace_out = (*backtrace) | std::ranges::views::transform([](u64 entry) {\n                            return std::format(\"{:016X}\", entry);\n                        }) |\n                        std::ranges::to<std::vector<std::string>>();", "        backtrace_out.emplace();\n        backtrace_out->reserve(backtrace->size());\n        for (const auto entry : *backtrace) {\n            backtrace_out->push_back(std::format(\"{:016X}\", entry));\n        }"),
+              ("    out.applet_normal_data = normal_channel | std::ranges::views::transform([](const auto& data) {\n                                 return Common::HexToString(data);\n                             }) |\n                             std::ranges::to<std::vector<std::string>>();", "    out.applet_normal_data.reserve(normal_channel.size());\n    for (const auto& entry : normal_channel) {\n        out.applet_normal_data.push_back(Common::HexToString(entry));\n    }"),
+              ("    out.applet_interactive_data =\n        interactive_channel | std::ranges::views::transform([](const auto& data) {\n            return Common::HexToString(data);\n        }) |\n        std::ranges::to<std::vector<std::string>>();", "    out.applet_interactive_data.reserve(interactive_channel.size());\n    for (const auto& entry : interactive_channel) {\n        out.applet_interactive_data.push_back(Common::HexToString(entry));\n    }"),
+              ("    out.play_report_data = data | std::ranges::views::transform([](const auto& d) {\n                               return Common::HexToString(d);\n                           }) |\n                           std::ranges::to<std::vector<std::string>>();", "    out.play_report_data.reserve(data.size());\n    for (const auto& entry : data) {\n        out.play_report_data.push_back(Common::HexToString(entry));\n    }"),
+          ]
+          for old, new in replacements:
+              if code.count(old) != 1:
+                  raise SystemExit('Unexpected reporter.cpp ranges conversion; review upstream before applying workaround')
+              code = code.replace(old, new)
+          path.write_text(code, encoding='utf-8')
+          print('Patched four CI-only reporter.cpp ranges conversions')
+          PY
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
             -DYUZU_USE_BUNDLED_QT=ON \
