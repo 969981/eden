@@ -319,7 +319,11 @@ jobs:
             -Dfmt_FORCE_BUNDLED=ON -Dxbyak_FORCE_BUNDLED=ON \
             -DVulkanMemoryAllocator_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
-          grep '^Qt6_DIR:PATH=' build/CMakeCache.txt
+          QT_CMAKE_DIR="$(sed -nE 's/^Qt6_DIR:[^=]+=(.*)$/\1/p' build/CMakeCache.txt)"
+          test -n "$QT_CMAKE_DIR"
+          test -f "$QT_CMAKE_DIR/Qt6Config.cmake"
+          test "$(realpath "$QT_CMAKE_DIR")" = "$(realpath "$QT_ROOT_DIR/lib/cmake/Qt6")"
+          echo "Verified configured Qt: $QT_CMAKE_DIR"
           cmake --build build --target yuzu --parallel 3
           test -x build/bin/eden
       - name: Package Ubuntu archive
@@ -331,7 +335,7 @@ jobs:
           cp LICENSE.txt dist/linux/
 
           # Ship matching Qt libraries and plugins; Ubuntu's system Qt is too old.
-          QT_CMAKE_DIR="$(sed -n 's/^Qt6_DIR:PATH=//p' build/CMakeCache.txt | head -n 1)"
+          QT_CMAKE_DIR="$(sed -nE 's/^Qt6_DIR:[^=]+=(.*)$/\1/p' build/CMakeCache.txt)"
           test -n "$QT_CMAKE_DIR"
           QT_PREFIX="$(realpath "$QT_CMAKE_DIR/../../..")"
           echo "Packaging Qt from $QT_PREFIX"
